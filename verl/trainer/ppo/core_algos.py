@@ -124,7 +124,7 @@ def compute_grpo_outcome_advantage(token_level_rewards: torch.Tensor,
             shape: (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
-
+    scores = torch.tensor(scores, dtype=torch.float64)
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
@@ -144,6 +144,7 @@ def compute_grpo_outcome_advantage(token_level_rewards: torch.Tensor,
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
             scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+        scores=torch.tensor(scores,dtype=torch.float32)
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
@@ -333,17 +334,9 @@ def agg_loss(loss_mat: torch.Tensor, loss_mask: torch.Tensor, loss_agg_mode: str
 
     return loss
 
-
-def compute_policy_loss(old_log_prob,
-                        log_prob,
-                        advantages,
-                        response_mask,
-                        cliprange=None,
-                        cliprange_low=None,
-                        cliprange_high=None,
-                        clip_ratio_c=3.0,
-                        loss_agg_mode="token-mean"):
+def compute_policy_loss(old_log_prob, log_prob, advantages, eos_mask, cliprange):
     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
+
     Args:
         old_log_prob: `(torch.Tensor)`
             shape: (bs, response_length)
@@ -351,55 +344,94 @@ def compute_policy_loss(old_log_prob,
             shape: (bs, response_length)
         advantages: `(torch.Tensor)`
             shape: (bs, response_length)
-        response_mask: `(torch.Tensor)`
+        eos_mask: `(torch.Tensor)`
             shape: (bs, response_length)
         cliprange: (float)
             The clip range used in PPO. See https://arxiv.org/abs/1707.06347
-        cliprange_low: (float)
-            The lower clip range used in PPO.
-        cliprange_high: (float)
-            The higher clip range used in PPO.
-        clip_ratio_c: (float) default: 3.0
-            The lower bound of the ratio for dual-clip PPO, See https://arxiv.org/pdf/1912.09729
-        loss_agg_mode: (str) choices: "token-mean" / "seq-mean-token-sum" / "seq-mean-token-mean"
-            "token-mean" is the default behavior        
 
     Returns:
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via PPO
         pg_clipfrac: (float)
-            the fraction of policy gradient loss being clipped
-        ppo_kl: (float)
-            the estimated KL divergence between the latest updating policy and the old sampling policy
-        pg_clipfrac_lower: (float)
-            the fraction of policy gradient loss being clipped when the advantage is negative
-    """
-    assert clip_ratio_c > 1.0, f"The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0, but get the value: {clip_ratio_c}."
+            a float number indicating the fraction of policy gradient loss being clipped
 
+    """
     negative_approx_kl = log_prob - old_log_prob
     ratio = torch.exp(negative_approx_kl)
-    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, eos_mask)
 
-    pg_losses1 = -advantages * ratio
-    if cliprange_low is None:
-        cliprange_low = cliprange
-    if cliprange_high is None:
-        cliprange_high = cliprange
-    pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low,
-                                           1 + cliprange_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
-    clip_pg_losses1 = torch.maximum(pg_losses1,
-                                    pg_losses2)  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
-    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    pg_losses = -advantages * ratio
+    pg_losses2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
 
-    pg_losses3 = -advantages * clip_ratio_c
-    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-    pg_clipfrac_lower = verl_F.masked_mean(
-        torch.gt(clip_pg_losses2, pg_losses3) * (advantages < 0).float(), response_mask)
+    pg_loss = verl_F.masked_mean(torch.max(pg_losses, pg_losses2), eos_mask)
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses).float(), eos_mask)
+    return pg_loss, pg_clipfrac, ppo_kl
+# def compute_policy_loss(old_log_prob,
+#                         log_prob,
+#                         advantages,
+#                         response_mask,
+#                         cliprange=None,
+#                         cliprange_low=None,
+#                         cliprange_high=None,
+#                         clip_ratio_c=3.0,
+#                         loss_agg_mode="token-mean"):
+#     """Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppo_trainer.py#L1122
+#     Args:
+#         old_log_prob: `(torch.Tensor)`
+#             shape: (bs, response_length)
+#         log_prob: `(torch.Tensor)`
+#             shape: (bs, response_length)
+#         advantages: `(torch.Tensor)`
+#             shape: (bs, response_length)
+#         response_mask: `(torch.Tensor)`
+#             shape: (bs, response_length)
+#         cliprange: (float)
+#             The clip range used in PPO. See https://arxiv.org/abs/1707.06347
+#         cliprange_low: (float)
+#             The lower clip range used in PPO.
+#         cliprange_high: (float)
+#             The higher clip range used in PPO.
+#         clip_ratio_c: (float) default: 3.0
+#             The lower bound of the ratio for dual-clip PPO, See https://arxiv.org/pdf/1912.09729
+#         loss_agg_mode: (str) choices: "token-mean" / "seq-mean-token-sum" / "seq-mean-token-mean"
+#             "token-mean" is the default behavior        
 
-    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+#     Returns:
+#         pg_loss: `a scalar torch.Tensor`
+#             policy gradient loss computed via PPO
+#         pg_clipfrac: (float)
+#             the fraction of policy gradient loss being clipped
+#         ppo_kl: (float)
+#             the estimated KL divergence between the latest updating policy and the old sampling policy
+#         pg_clipfrac_lower: (float)
+#             the fraction of policy gradient loss being clipped when the advantage is negative
+#     """
+#     assert clip_ratio_c > 1.0, f"The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0, but get the value: {clip_ratio_c}."
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+#     negative_approx_kl = log_prob - old_log_prob
+#     ratio = torch.exp(negative_approx_kl)
+#     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+#     pg_losses1 = -advantages * ratio
+#     if cliprange_low is None:
+#         cliprange_low = cliprange
+#     if cliprange_high is None:
+#         cliprange_high = cliprange
+#     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low,
+#                                            1 + cliprange_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
+#     clip_pg_losses1 = torch.maximum(pg_losses1,
+#                                     pg_losses2)  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
+#     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+
+#     pg_losses3 = -advantages * clip_ratio_c
+#     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+#     pg_clipfrac_lower = verl_F.masked_mean(
+#         torch.gt(clip_pg_losses2, pg_losses3) * (advantages < 0).float(), response_mask)
+
+#     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+#     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+#     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
 def compute_entropy_loss(logits, response_mask):

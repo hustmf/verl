@@ -38,6 +38,16 @@ except:
     pass
 
 
+def append_to_dict(data: Dict, new_data: Dict):
+    for key, val in new_data.items():
+        if key not in data:
+            data[key] = []
+        if isinstance(val,list):
+            data[key].extend(val)
+        else:
+            data[key].append(val)
+
+
 def pad_dataproto_to_divisor(data: 'DataProto', size_divisor: int):
     """Pad a DataProto to size divisible by size_divisor
 
@@ -651,6 +661,14 @@ class DataProto:
         non_tensor_batch = list_of_dict_to_dict_of_list(list_of_dict=[d.non_tensor_batch for d in data])
         for key, val in non_tensor_batch.items():
             non_tensor_batch[key] = np.concatenate(val, axis=0)
+            
+        if "metrics" in data[0].meta_info:
+             new_metric={}
+             for item in data:
+                current_meta_info=item.meta_info
+                current_metric=current_meta_info['metrics']
+                append_to_dict(new_metric, current_metric)
+             data[0].meta_info['metrics']=new_metric           
 
         return DataProto(batch=new_batch, non_tensor_batch=non_tensor_batch, meta_info=data[0].meta_info)
 

@@ -183,6 +183,12 @@ class vLLMRollout(BaseRollout):
 
         batch_size = idx.size(0)
 
+        #######################
+        idx_list = []
+        for i in range(batch_size):
+            idx_list.append(_pre_process_inputs(self.pad_token_id, idx[i]))
+        #######################
+
         non_tensor_batch = prompts.non_tensor_batch
         if 'raw_prompt_ids' not in non_tensor_batch:
             non_tensor_batch['raw_prompt_ids'] = np.array(
@@ -233,8 +239,9 @@ class vLLMRollout(BaseRollout):
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
             outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                #prompts=vllm_inputs,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
+                prompt_token_ids=idx_list,
                 use_tqdm=False)
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable

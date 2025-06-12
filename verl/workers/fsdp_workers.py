@@ -271,7 +271,7 @@ class ActorRolloutRefWorker(Worker):
             from verl.utils.torch_functional import get_constant_schedule_with_warmup
             actor_optimizer = optim.AdamW(actor_module_fsdp.parameters(),
                                           lr=optim_config.lr,
-                                          betas=optim_config.get('betas', (0.9, 0.999)),
+                                          betas=(optim_config.get('adam_beta1', 0.9), optim_config.get('adam_beta2', 0.95)),
                                           weight_decay=optim_config.get('weight_decay', 1e-2))
 
             total_steps = optim_config.get('total_training_steps', 0)
